@@ -1,0 +1,11 @@
+{
+  "id": "space.nuvio.webos",
+  "version": "0.1.2",
+  "vendor": "Nuvio Media",
+  "type": "web",
+  "main": "index.html",
+  "title": "Nuvio TV",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "disableBackHistoryAPI": true
+}

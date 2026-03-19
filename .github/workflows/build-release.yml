@@ -1,0 +1,97 @@
+name: Build webOS Release Asset
+
+on:
+  repository_dispatch:
+    types: [build-release]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: Shared source repository, owner/name
+        required: true
+      tag:
+        description: Release tag to build
+        required: true
+
+jobs:
+  build-ipk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SOURCE_REPO: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source_repo || inputs.source_repo }}
+      SOURCE_TAG: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag }}
+      REBUILD_WEBOS: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.rebuild_webos || 'false' }}
+    steps:
+      - name: Check out wrapper repository
+        uses: actions/checkout@v4
+
+      - name: Resolve effective build mode
+        id: mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$REBUILD_WEBOS" = "true" ]; then
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PREVIOUS_TAG=$(gh release list --repo "$SOURCE_REPO" --exclude-drafts --exclude-pre-releases --limit 20 --json tagName | node -e "const fs=require('fs');const releases=JSON.parse(fs.readFileSync(0,'utf8'));const current=process.env.SOURCE_TAG;const match=releases.find((release)=>release.tagName!==current);if(!match){process.exit(1)};process.stdout.write(match.tagName);" 2>/dev/null || true)
+          if [ -n "$PREVIOUS_TAG" ] && gh release download "$PREVIOUS_TAG" --repo "$SOURCE_REPO" --pattern "NuvioTV-webOS-*.ipk" --dir .; then
+            echo "rebuild=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No previous reusable webOS IPK found; rebuilding wrapper"
+            echo "rebuild=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: ${{ steps.mode.outputs.rebuild == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Update app version from tag
+        if: ${{ steps.mode.outputs.rebuild == 'true' }}
+        run: |
+          VERSION="${SOURCE_TAG#v}"
+          VERSION="$VERSION" node -e "const fs=require('fs');const file='appinfo.json';const app=JSON.parse(fs.readFileSync(file,'utf8'));app.version=String(process.env.VERSION||app.version||'0.0.0');fs.writeFileSync(file, JSON.stringify(app, null, 2)+'\\n');"
+
+      - name: Install webOS CLI
+        if: ${{ steps.mode.outputs.rebuild == 'true' }}
+        run: npm --version
+
+      - name: Package IPK
+        if: ${{ steps.mode.outputs.rebuild == 'true' }}
+        run: npm exec --yes --package @webos-tools/cli@3.2.2 -- ares-package .
+
+      - name: Normalize IPK asset name
+        run: |
+          PACKAGE_FILE=$(ls *.ipk)
+          TARGET_FILE="NuvioTV-webOS-${SOURCE_TAG}.ipk"
+          rm -f "$TARGET_FILE"
+          mv "$PACKAGE_FILE" "$TARGET_FILE"
+
+      - name: Refresh Homebrew repository metadata
+        run: |
+          SHA256=$(shasum -a 256 "NuvioTV-webOS-${SOURCE_TAG}.ipk" | cut -d' ' -f1)
+          SIZE=$(wc -c < "NuvioTV-webOS-${SOURCE_TAG}.ipk" | tr -d ' ')
+          VERSION="${SOURCE_TAG#v}"
+          SOURCE_TAG="$SOURCE_TAG" SHA256="$SHA256" SIZE="$SIZE" VERSION="$VERSION" REBUILD_WEBOS="${{ steps.mode.outputs.rebuild }}" node -e "const fs=require('fs');const file='webosbrew/apps.json';const data=JSON.parse(fs.readFileSync(file,'utf8'));const pkg=data.packages[0];if(process.env.REBUILD_WEBOS==='true'){pkg.manifest.version=process.env.VERSION;}pkg.manifest.ipkUrl='https://github.com/NuvioMedia/NuvioWeb/releases/download/'+process.env.SOURCE_TAG+'/NuvioTV-webOS-'+process.env.SOURCE_TAG+'.ipk';pkg.manifest.ipkHash.sha256=process.env.SHA256;pkg.manifest.ipkSize=Number(process.env.SIZE);fs.writeFileSync(file, JSON.stringify(data, null, 2)+'\n');"
+
+      - name: Commit repository metadata update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git restore appinfo.json
+          git add webosbrew/apps.json
+          if git diff --cached --quiet; then
+            echo "No metadata changes to commit"
+            exit 0
+          fi
+          git commit -m "Update webOS repository metadata for ${SOURCE_TAG}"
+          git push origin HEAD:main
+
+      - name: Upload IPK to shared release
+        env:
+          GH_TOKEN: ${{ secrets.MAIN_REPO_RELEASE_TOKEN }}
+        run: |
+          gh release upload "$SOURCE_TAG" "NuvioTV-webOS-${SOURCE_TAG}.ipk" --repo "$SOURCE_REPO" --clobber

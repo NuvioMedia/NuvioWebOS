@@ -12,7 +12,7 @@
       "iconUri": "https://raw.githubusercontent.com/NuvioMedia/NuvioWebOS/main/icon.png",
       "manifest": {
         "id": "space.nuvio.webos",
-        "version": "0.1.0",
+        "version": "0.1.2",
         "type": "web",
         "title": "Nuvio TV",
         "appDescription": "Hosted LG webOS wrapper for Nuvio TV.",
